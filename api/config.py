@@ -4,6 +4,7 @@ from pydantic_settings import BaseSettings
 
 
 class Config(BaseSettings):
+    APP_URL: str = "http://localhost:8000"
     LFS_SERVER_HOST: str = "http://localhost:8080"
 
     # Github OAuth

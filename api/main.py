@@ -5,7 +5,8 @@ import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import StreamingResponse
 
-from .config import config
+from api.config import config
+from api.views.auth import router as auth_router
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -28,13 +29,20 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Git LFS Proxy", lifespan=lifespan)
 
 
+app.include_router(
+    auth_router,
+    prefix="/auth",
+    tags=["Authentication"],
+)
+
+
 async def proxy_request(request: Request, method: str, path: str, query_params: str | None = None) -> Response:
     """
     Generic proxy function that forwards requests to the backend LFS server.
     """
     client_ip = request.client.host if request.client else "unknown"
 
-    url = f"{config.LFS_SERVER_HOST.rstrip('/')}/{path.lstrip('/')}"
+    url = f"{config.LFS_SERVER_HOST}/{path.lstrip('/')}"
     if query_params:
         url = f"{url}?{query_params}"
 
