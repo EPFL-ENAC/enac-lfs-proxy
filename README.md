@@ -19,5 +19,6 @@ make install
 # ✅ Running
 
 ```bash
+make lfs-up
 make run
 ```
