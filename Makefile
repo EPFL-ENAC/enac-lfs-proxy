@@ -4,7 +4,7 @@ install:
 	uv venv --python 3.14 --allow-existing
 	uv pip install -e .[dev]
 	uv run pre-commit install
-	cp .env.example $(env_path)
+	[ ! -f $(env_path) ] && cp .env.example $(env_path) || true
 
 lfs-up:
 	docker compose up -d

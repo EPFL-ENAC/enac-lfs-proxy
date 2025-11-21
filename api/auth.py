@@ -1,13 +1,12 @@
 import logging
 import time
-from typing import Optional
 
 import httpx
 from fastapi import Cookie, HTTPException
 from jose import jwt
 
 from api.config import config
-from api.models.auth import User
+from api.models.auth import GitHubPermissions, User
 
 GH_API_URL = "https://github.com/login/oauth/access_token"
 GH_USER_API = "https://api.github.com/user"
@@ -60,7 +59,6 @@ async def make_jwt(code: str):
                 detail=f"GitHub user / repo permission request failed: {str(e)}",
             )
 
-    # Make a JWT
     current_time = int(time.time())
     jwt_token = jwt.encode(
         {
@@ -69,7 +67,7 @@ async def make_jwt(code: str):
             "sub": github_user["login"],
             "full_name": github_user.get("name"),
             "email": github_user.get("email"),
-            "role": "admin" if perm_data.get("push", False) else "contributor",
+            "github_token": token,
             "iat": current_time,
             "exp": current_time + JWT_EXPIRY_SECONDS,
         },
@@ -79,47 +77,79 @@ async def make_jwt(code: str):
     return jwt_token
 
 
-def get_user(token: Optional[str] = Cookie(None, alias="token")) -> User:
-    """Get, decode and validate a JWT token and make a user.
+async def get_user_with_repo_permissions(owner: str, repo: str, github_token: str | None = None) -> User:
+    """Get user and fetch their permissions for a specific repository using GitHub token.
 
     Args:
-        token: The JWT token to validate.
+        owner: The repository owner.
+        repo: The repository name.
+        github_token: The GitHub personal access token to validate.
 
     Returns:
-        The user associated with the JWT token.
+        The user with repository permissions.
 
     Raises:
-        HTTPException: If the token is invalid or expired.
+        HTTPException: If the token is invalid or GitHub API call fails.
     """
-    if not token:
+    if not github_token:
         raise HTTPException(status_code=401, detail="missing_token")
+
     try:
-        # decoding also performs validation of issuer and exp claims
-        decoded = jwt.decode(token, config.JWT_SECRET, issuer="mmsdb", algorithms=["HS256"])
+        async with httpx.AsyncClient() as client:
+            # Get user info
+            user_res = await client.get(
+                GH_USER_API,
+                headers={"Authorization": f"token {github_token}"},
+            )
+
+            if user_res.status_code != 200:
+                raise HTTPException(status_code=401, detail="invalid_github_token")
+
+            user_data = user_res.json()
+
+            # Get repository permissions
+            repo_res = await client.get(
+                GH_REPO_PERMISSION_API.format(owner=owner, repo=repo),
+                headers={"Authorization": f"token {github_token}"},
+            )
+
+            if repo_res.status_code == 404:
+                raise HTTPException(status_code=404, detail="repository_not_found")
+            elif repo_res.status_code != 200:
+                raise HTTPException(status_code=403, detail="access_denied")
+
+            repo_data = repo_res.json()
+            perm_data = repo_data.get("permissions", {})
+
         return User(
-            username=decoded.get("sub"),
-            email=decoded.get("email", None),
-            full_name=decoded.get("full_name", decoded.get("sub")),
-            role=decoded.get("role", "contributor"),
+            username=user_data.get("login"),
+            email=user_data.get("email", None),
+            full_name=user_data.get("name", user_data.get("login")),
+            permissions=GitHubPermissions(
+                pull=perm_data.get("pull", False),
+                push=perm_data.get("push", False),
+                admin=perm_data.get("admin", False),
+            ),
         )
-    except Exception as e:
-        logging.exception("Failed to decode JWT token", e)
-        raise HTTPException(status_code=401, detail="invalid_token")
+
+    except httpx.RequestError as e:
+        logging.exception("GitHub API request failed", e)
+        raise HTTPException(status_code=502, detail="github_api_error")
 
 
-def get_admin_user(token: Optional[str] = Cookie(None, alias="token")) -> User:
-    """Get user from token and make sure role is admin.
+def check_repository_access(method: str, user: User) -> bool:
+    """Check if user has required permissions for the HTTP method.
 
     Args:
-        token: The JWT token to validate.
+        method: HTTP method (GET, POST, PUT, etc.)
+        user: User with repository permissions
 
     Returns:
-        The user associated with the JWT token.
-
-    Raises:
-        HTTPException: If the token is invalid or expired.
+        True if user has required permissions, False otherwise
     """
-    user = get_user(token)
-    if user.role != "admin":
-        raise HTTPException(status_code=403, detail="insufficient_permissions")
-    return user
+    if method.upper() in ["GET", "HEAD", "OPTIONS"]:
+        return user.permissions.pull
+    elif method.upper() in ["POST", "PUT", "PATCH", "DELETE"]:
+        return user.permissions.push
+    else:
+        return False
