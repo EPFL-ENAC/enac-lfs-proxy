@@ -38,6 +38,11 @@ app.include_router(
 )
 
 
+@app.get("/healthz", tags=["Health"])
+async def health_check():
+    return {"status": "ok"}
+
+
 async def proxy_request(request: Request, method: str, path: str, query_params: str | None = None) -> Response:
     """
     Generic proxy function that forwards requests to the backend LFS server.

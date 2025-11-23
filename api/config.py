@@ -12,8 +12,6 @@ class Config(BaseSettings):
     # Github OAuth
     GITHUB_CLIENT_ID: str
     GITHUB_CLIENT_SECRET: str
-    GITHUB_REPO_OWNER: str = "EPFL-ENAC"
-    GITHUB_REPO_NAME: str = "git-lfs-proxy"
 
 
 @lru_cache()
