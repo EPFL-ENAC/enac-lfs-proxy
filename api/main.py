@@ -53,7 +53,7 @@ async def proxy_request(request: Request, method: str, path: str, query_params: 
     if query_params:
         url = f"{url}?{query_params}"
 
-    logger.info(f"Incoming request: {method} {path} from {client_ip}")
+    logger.info(f"Proxying request: {method} {path} from {client_ip}")
     logger.debug(f"Full URL: {url}")
     logger.debug(f"Request headers: {dict(request.headers)}")
 
@@ -89,7 +89,9 @@ async def proxy_request(request: Request, method: str, path: str, query_params: 
         for header in hop_by_hop_headers:
             response_headers.pop(header, None)
 
-        logger.info(f"Response: {backend_response.status_code} for {method} {path} from {client_ip}")
+        logger.info(
+            f"Response from proxied service: {backend_response.status_code} for {method} {path} from {client_ip}"
+        )
         logger.debug(f"Response headers: {response_headers}")
 
         async def response_stream():
@@ -114,9 +116,11 @@ async def proxy_all(request: Request, full_path: str):
     Catch-all route that proxies all HTTP methods to the backend.
     This handles all Git LFS API endpoints generically with GitHub authentication.
     """
+    logger.info(f"Received request for path: {full_path}")
+
     path_parts = full_path.strip("/").split("/")
     if len(path_parts) < 3 or path_parts[0] != "api":
-        raise HTTPException(status_code=404, detail="Not Found")
+        raise HTTPException(status_code=400, detail="Invalid path format")
 
     owner = path_parts[1]
     repo = path_parts[2]
@@ -138,7 +142,7 @@ async def proxy_all(request: Request, full_path: str):
 
     if not username or not token:
         logger.info(
-            f"Unauthorized access attempt to {owner}/{repo} from {request.client.host if request.client else 'unknown'}"
+            f"Missing basic auth info in access attempt to {owner}/{repo} from {request.client.host if request.client else 'unknown'}"
         )
         return Response(
             status_code=401,
@@ -148,6 +152,7 @@ async def proxy_all(request: Request, full_path: str):
     permissions = await get_user_permissions(username, token, owner, repo)
 
     if not check_repository_access(request.method, permissions):
+        logger.info(f"Forbidden access attempt to {owner}/{repo} by user {username} with insufficient permissions")
         raise HTTPException(
             status_code=403, detail=f"Insufficient permissions to {request.method.upper()} in {owner}/{repo}"
         )

@@ -10,9 +10,13 @@ GITHUB_OAUTH_URL = "https://github.com/login/oauth/access_token"
 GITHUB_USER_API_URL = "https://api.github.com/user"
 GITHUB_REPO_API_URL = "https://api.github.com/repos/{owner}/{repo}"
 
+logger = logging.getLogger("uvicorn.error")
+
 
 async def generate_token(code: str):
     """Generate a GitHub token after validating the OAuth2 code with GitHub."""
+    logger.info("Generating GitHub OAuth token")
+
     async with httpx.AsyncClient() as client:
         token_res = await client.post(
             GITHUB_OAUTH_URL,
@@ -43,6 +47,8 @@ async def generate_token(code: str):
 
 
 async def get_user_permissions(username: str, token: str, owner: str, repo: str) -> GitHubPermissions:
+    logger.info(f"Fetching permissions for user '{username}' on repo '{owner}/{repo}'")
+
     # Admin access for internal API token
     if (
         config.FULL_ACCESS_USERNAME is not None
@@ -84,14 +90,16 @@ async def get_user_permissions(username: str, token: str, owner: str, repo: str)
         )
 
     except httpx.RequestError as e:
-        logging.exception("GitHub API request failed", e)
+        logger.info("GitHub API request failed", e)
         raise HTTPException(status_code=502, detail="GitHub API error")
 
 
 def check_repository_access(method: str, permissions: GitHubPermissions) -> bool:
-    if method.upper() in ["GET", "HEAD", "OPTIONS"]:
+    logger.info(f"Checking access for method '{method}' with permissions: {permissions}")
+
+    if method.upper() in ["GET", "HEAD", "OPTIONS", "POST"]:
         return permissions.pull or permissions.admin
-    elif method.upper() in ["POST", "PUT", "PATCH", "DELETE"]:
+    elif method.upper() in ["PUT", "PATCH", "DELETE"]:
         return permissions.push or permissions.admin
     else:
         return False
