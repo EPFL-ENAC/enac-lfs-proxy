@@ -1,12 +1,13 @@
+import base64
 import logging
 from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 
-from api.auth import check_repository_access, get_user_with_repo_permissions
 from api.config import config
+from api.services.auth import check_repository_access, get_user_permissions
 from api.views.auth import router as auth_router
 
 logger = logging.getLogger("uvicorn.error")
@@ -110,7 +111,7 @@ async def proxy_all(request: Request, full_path: str):
     """
     path_parts = full_path.strip("/").split("/")
     if len(path_parts) < 3 or path_parts[0] != "api":
-        raise HTTPException(status_code=400, detail="Invalid path format. Expected: api/OWNER/REPO/...")
+        raise HTTPException(status_code=404, detail="Not Found")
 
     owner = path_parts[1]
     repo = path_parts[2]
@@ -121,8 +122,6 @@ async def proxy_all(request: Request, full_path: str):
     auth_header = request.headers.get("authorization")
 
     if auth_header and auth_header.startswith("Basic "):
-        import base64
-
         try:
             # Decode Base64 credentials
             encoded_credentials = auth_header[6:]  # Remove "Basic " prefix
@@ -136,75 +135,16 @@ async def proxy_all(request: Request, full_path: str):
         logger.info(
             f"Unauthorized access attempt to {owner}/{repo} from {request.client.host if request.client else 'unknown'}"
         )
-        # Return HTML page with login link for browser access
-        login_url = f"{config.APP_URL}/auth/login"
-        html_content = f"""
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Authentication Required</title>
-    <style>
-        body {{ font-family: Arial, sans-serif; max-width: 600px; margin: 100px auto; padding: 20px; text-align: center; }}
-        .login-box {{ background: #f8f9fa; padding: 30px; border-radius: 8px; border: 1px solid #dee2e6; }}
-        .btn {{ background: #007bff; color: white; padding: 12px 24px; text-decoration: none; border-radius: 4px; display: inline-block; }}
-        .btn:hover {{ background: #0056b3; }}
-    </style>
-</head>
-<body>
-    <div class="login-box">
-        <h1>Authentication Required</h1>
-        <p>Please authenticate to access this Git LFS repository.</p>
-        <a href="{login_url}" class="btn">Login with GitHub</a>
-    </div>
-</body>
-</html>
-        """
         return Response(
-            content=html_content,
             status_code=401,
-            media_type="text/html",
             headers={"WWW-Authenticate": 'Basic realm="Git LFS Repository"'},
         )
 
-    try:
-        user = await get_user_with_repo_permissions(owner, repo, token)
-    except HTTPException as e:
-        if e.status_code == 401:
-            # Token is invalid/expired, provide login instructions
-            login_url = f"{config.APP_URL}/auth/login"
-            html_content = f"""
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Authentication Failed</title>
-    <style>
-        body {{ font-family: Arial, sans-serif; max-width: 600px; margin: 100px auto; padding: 20px; text-align: center; }}
-        .error-box {{ background: #f8d7da; padding: 30px; border-radius: 8px; border: 1px solid #f5c6cb; }}
-        .btn {{ background: #007bff; color: white; padding: 12px 24px; text-decoration: none; border-radius: 4px; display: inline-block; }}
-        .btn:hover {{ background: #0056b3; }}
-    </style>
-</head>
-<body>
-    <div class="error-box">
-        <h1>Authentication Failed</h1>
-        <p>Invalid or expired credentials. Please re-authenticate.</p>
-        <a href="{login_url}" class="btn">Login with GitHub</a>
-    </div>
-</body>
-</html>
-            """
-            return Response(
-                content=html_content,
-                status_code=401,
-                media_type="text/html",
-                headers={"WWW-Authenticate": 'Basic realm="Git LFS Repository"'},
-            )
-        raise e
+    permissions = await get_user_permissions(username, token, owner, repo)
 
-    if not check_repository_access(request.method, user):
-        method_type = "read" if request.method.upper() in ["GET", "HEAD", "OPTIONS"] else "write"
+    if not check_repository_access(request.method, permissions):
         raise HTTPException(
-            status_code=403, detail=f"Insufficient permissions for {method_type} access to {owner}/{repo}"
+            status_code=403, detail=f"Insufficient permissions to {request.method.upper()} in {owner}/{repo}"
         )
 
     query_string = str(request.query_params) if request.query_params else None
