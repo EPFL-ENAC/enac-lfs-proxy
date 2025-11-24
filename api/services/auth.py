@@ -56,6 +56,7 @@ async def get_user_permissions(username: str, token: str, owner: str, repo: str)
         and config.FULL_ACCESS_TOKEN is not None
         and token == config.FULL_ACCESS_TOKEN
     ):
+        logger.info("Granting full access via internal API token")
         return GitHubPermissions(pull=True, push=True, admin=True)
 
     try:
@@ -67,6 +68,7 @@ async def get_user_permissions(username: str, token: str, owner: str, repo: str)
             )
 
             if user_res.status_code != 200:
+                logger.info("Cannot get user permissions: invalid or expired token")
                 raise HTTPException(status_code=401, detail="Invalid or expired token")
 
             # Get repository permissions
@@ -76,13 +78,16 @@ async def get_user_permissions(username: str, token: str, owner: str, repo: str)
             )
 
             if repo_res.status_code == 404:
+                logger.info("Cannot get user permissions: repository not found")
                 raise HTTPException(status_code=404, detail="Repository not found")
             elif repo_res.status_code != 200:
+                logger.info("Cannot get user permissions: access to repository denied")
                 raise HTTPException(status_code=403, detail="Access to repository denied")
 
             repo_data = repo_res.json()
             perm_data = repo_data.get("permissions", {})
 
+        logger.info(f"Got user '{username}' permissions on '{owner}/{repo}': {perm_data}")
         return GitHubPermissions(
             pull=perm_data.get("pull", False),
             push=perm_data.get("push", False),
@@ -90,13 +95,11 @@ async def get_user_permissions(username: str, token: str, owner: str, repo: str)
         )
 
     except httpx.RequestError as e:
-        logger.info("GitHub API request failed", e)
+        logger.info("Cannot get user permissions: GitHub API request error", e)
         raise HTTPException(status_code=502, detail="GitHub API error")
 
 
 def check_repository_access(method: str, permissions: GitHubPermissions) -> bool:
-    logger.info(f"Checking access for method '{method}' with permissions: {permissions}")
-
     if method.upper() in ["GET", "HEAD", "OPTIONS", "POST"]:
         return permissions.pull or permissions.admin
     elif method.upper() in ["PUT", "PATCH", "DELETE"]:
