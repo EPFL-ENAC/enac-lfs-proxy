@@ -1,4 +1,5 @@
 import logging
+import time
 
 import httpx
 from fastapi import HTTPException
@@ -46,6 +47,18 @@ async def generate_token(code: str):
     return token
 
 
+_user_permissions_cache: dict[str, tuple[float, GitHubPermissions]] = {}
+
+
+def clear_user_permissions_cache():
+    """Clear the user permissions cache."""
+    _user_permissions_cache.clear()
+
+
+def _get_cache_key(username, token, owner, repo):
+    return f"{username}:{token}@{owner}/{repo}"
+
+
 async def get_user_permissions(username: str, token: str, owner: str, repo: str) -> GitHubPermissions:
     logger.info(f"Fetching permissions for user '{username}' on repo '{owner}/{repo}'")
 
@@ -58,6 +71,18 @@ async def get_user_permissions(username: str, token: str, owner: str, repo: str)
     ):
         logger.info("Granting full access via internal API token")
         return GitHubPermissions(pull=True, push=True, admin=True)
+
+    # Check cache
+    cache_key = _get_cache_key(username, token, owner, repo)
+    now = time.time()
+    cached = _user_permissions_cache.get(cache_key)
+    if cached:
+        expires_at, permissions = cached
+        if now < expires_at:
+            logger.info(f"Returning cached permissions for '{username}' on '{owner}/{repo}': {permissions}")
+            return permissions
+        else:
+            del _user_permissions_cache[cache_key]
 
     try:
         async with httpx.AsyncClient() as client:
@@ -87,12 +112,15 @@ async def get_user_permissions(username: str, token: str, owner: str, repo: str)
             repo_data = repo_res.json()
             perm_data = repo_data.get("permissions", {})
 
-        logger.info(f"Got user '{username}' permissions on '{owner}/{repo}': {perm_data}")
-        return GitHubPermissions(
+        permissions = GitHubPermissions(
             pull=perm_data.get("pull", False),
             push=perm_data.get("push", False),
             admin=perm_data.get("admin", False),
         )
+        logger.info(f"Got user '{username}' permissions on '{owner}/{repo}': {permissions}")
+
+        _user_permissions_cache[cache_key] = (now + config.GITHUB_PERMISSIONS_CACHE_TTL_SECONDS, permissions)
+        return permissions
 
     except httpx.RequestError as e:
         logger.info("Cannot get user permissions: GitHub API request error", e)

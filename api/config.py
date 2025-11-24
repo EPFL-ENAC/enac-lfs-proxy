@@ -12,6 +12,7 @@ class Config(BaseSettings):
     # Github OAuth
     GITHUB_CLIENT_ID: str
     GITHUB_CLIENT_SECRET: str
+    GITHUB_PERMISSIONS_CACHE_TTL_SECONDS: int = 60
 
 
 @lru_cache()
