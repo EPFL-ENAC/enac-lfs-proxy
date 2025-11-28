@@ -87,14 +87,14 @@ async def get_user_permissions(username: str, token: str, owner: str, repo: str)
     try:
         async with httpx.AsyncClient() as client:
             # Get user info
-            user_res = await client.get(
-                GITHUB_USER_API_URL,
-                headers={"Authorization": f"token {token}"},
-            )
+            # user_res = await client.get(
+            #     GITHUB_USER_API_URL,
+            #     headers={"Authorization": f"token {token}"},
+            # )
 
-            if user_res.status_code != 200:
-                logger.info("Cannot get user permissions: invalid or expired token")
-                raise HTTPException(status_code=401, detail="Invalid or expired token")
+            # if user_res.status_code != 200:
+            #     logger.info("Cannot get user permissions: invalid or expired token")
+            #     raise HTTPException(status_code=401, detail="Invalid or expired token")
 
             # Get repository permissions
             repo_res = await client.get(
