@@ -1,4 +1,4 @@
-# FRAME CLI
+# Git LFS Proxy
 
 _FastAPI proxy for bare Git LFS server, with GitHub OAuth_
 
