@@ -122,6 +122,22 @@ async def proxy_all(request: Request, full_path: str):
     if len(path_parts) < 3 or path_parts[0] != "api":
         raise HTTPException(status_code=400, detail="Invalid path format")
 
+    query_string = str(request.query_params) if request.query_params else None
+    body = await request.json()
+    operation = body.get("operation") if body else None
+
+    if not operation:
+        logger.info(f"No operation specified in request body for path: {full_path}")
+        raise HTTPException(status_code=400, detail="Missing 'operation' in request body")
+
+    if operation not in ["download", "upload"]:
+        logger.info(f"Invalid operation '{operation}' specified in request body for path: {full_path}")
+        raise HTTPException(status_code=400, detail="Invalid 'operation' value in request body")
+
+    if operation == "download":
+        logger.info(f"Proxying download operation for path: {full_path}")
+        return await proxy_request(request=request, method=request.method, path=full_path, query_params=query_string)
+
     owner = path_parts[1]
     repo = path_parts[2]
 
@@ -156,7 +172,5 @@ async def proxy_all(request: Request, full_path: str):
         raise HTTPException(
             status_code=403, detail=f"Insufficient permissions to {request.method.upper()} in {owner}/{repo}"
         )
-
-    query_string = str(request.query_params) if request.query_params else None
 
     return await proxy_request(request=request, method=request.method, path=full_path, query_params=query_string)

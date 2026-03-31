@@ -8,6 +8,7 @@ class Config(BaseSettings):
     FULL_ACCESS_USERNAME: str | None = None
     FULL_ACCESS_TOKEN: str | None = None
     LFS_SERVER_HOST: str = "http://localhost:8080"
+    PUSH_IP_RANGES: list[str] = ["127.0.0.0/8", "::1/128"]
 
     # Github OAuth
     GITHUB_CLIENT_ID: str
