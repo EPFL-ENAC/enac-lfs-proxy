@@ -1,4 +1,5 @@
 import base64
+import ipaddress
 import logging
 from contextlib import asynccontextmanager
 
@@ -9,6 +10,9 @@ from fastapi.responses import StreamingResponse
 from api.config import config
 from api.services.auth import check_repository_access, get_user_permissions
 from api.views.auth import router as auth_router
+
+ALLOWED_NETWORKS = [ipaddress.ip_network(cidr) for cidr in config.PUSH_IP_RANGES]
+
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -41,6 +45,23 @@ app.include_router(
 @app.get("/healthz", tags=["Health"])
 async def health_check():
     return {"status": "ok"}
+
+
+async def ensure_ip_allowed(request: Request):
+    if not request.client:
+        logger.warning("Request missing client information, denying access")
+        raise HTTPException(status_code=403, detail="Missing client information")
+
+    client_ip_str = request.client.host
+
+    try:
+        ip = ipaddress.ip_address(client_ip_str)
+        if not any(ip in net for net in ALLOWED_NETWORKS):
+            logger.warning(f"Access attempt from disallowed IP: {client_ip_str}")
+            raise HTTPException(status_code=403, detail="IP address not allowed")
+    except ValueError:
+        logger.warning(f"Invalid client IP address: {client_ip_str}")
+        raise HTTPException(status_code=403, detail="Invalid client IP address")
 
 
 async def proxy_request(request: Request, method: str, path: str, query_params: str | None = None) -> Response:
@@ -137,6 +158,8 @@ async def proxy_all(request: Request, full_path: str):
     if operation == "download":
         logger.info(f"Proxying download operation for path: {full_path}")
         return await proxy_request(request=request, method=request.method, path=full_path, query_params=query_string)
+
+    await ensure_ip_allowed(request)
 
     owner = path_parts[1]
     repo = path_parts[2]
