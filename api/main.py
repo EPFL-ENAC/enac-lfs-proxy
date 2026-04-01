@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
 from api.config import config
+from api.models.auth import GitHubPermissions
 from api.services.auth import check_repository_access, get_user_permissions
 from api.views.auth import router as auth_router
 
@@ -136,30 +137,13 @@ async def proxy_all(request: Request, full_path: str):
     """
     Catch-all route that proxies all HTTP methods to the backend.
     This handles all Git LFS API endpoints generically with GitHub authentication.
+    The full access token always pass through. Other requests are filtered by IP and permissions.
     """
     logger.info(f"Received request for path: {full_path}")
 
     path_parts = full_path.strip("/").split("/")
     if len(path_parts) < 3 or path_parts[0] != "api":
         raise HTTPException(status_code=400, detail="Invalid path format")
-
-    query_string = str(request.query_params) if request.query_params else None
-    body = await request.json()
-    operation = body.get("operation") if body else None
-
-    if not operation:
-        logger.info(f"No operation specified in request body for path: {full_path}")
-        raise HTTPException(status_code=400, detail="Missing 'operation' in request body")
-
-    if operation not in ["download", "upload"]:
-        logger.info(f"Invalid operation '{operation}' specified in request body for path: {full_path}")
-        raise HTTPException(status_code=400, detail="Invalid 'operation' value in request body")
-
-    if operation == "download":
-        logger.info(f"Proxying download operation for path: {full_path}")
-        return await proxy_request(request=request, method=request.method, path=full_path, query_params=query_string)
-
-    await ensure_ip_allowed(request)
 
     owner = path_parts[1]
     repo = path_parts[2]
@@ -176,7 +160,9 @@ async def proxy_all(request: Request, full_path: str):
             decoded_credentials = base64.b64decode(encoded_credentials).decode("utf-8")
             username, token = decoded_credentials.split(":", 1)
         except (ValueError, UnicodeDecodeError):
-            # Invalid Basic Auth format
+            logger.warning(
+                f"Invalid Basic auth header format in access attempt to {owner}/{repo} from {request.client.host if request.client else 'unknown'}"
+            )
             pass
 
     if not username or not token:
@@ -188,12 +174,25 @@ async def proxy_all(request: Request, full_path: str):
             headers={"WWW-Authenticate": 'Basic realm="Git LFS Repository"'},
         )
 
-    permissions = await get_user_permissions(username, token, owner, repo)
+    # Admin access for internal API token
+    if (
+        config.FULL_ACCESS_USERNAME is not None
+        and username == config.FULL_ACCESS_USERNAME
+        and config.FULL_ACCESS_TOKEN is not None
+        and token == config.FULL_ACCESS_TOKEN
+    ):
+        logger.info("Granting full access via internal API token")
+        permissions = GitHubPermissions(pull=True, push=True, admin=True)
+    else:
+        await ensure_ip_allowed(request)
+        permissions = await get_user_permissions(username, token, owner, repo)
 
     if not check_repository_access(request.method, permissions):
         logger.info(f"Forbidden access attempt to {owner}/{repo} by user {username} with insufficient permissions")
         raise HTTPException(
             status_code=403, detail=f"Insufficient permissions to {request.method.upper()} in {owner}/{repo}"
         )
+
+    query_string = str(request.query_params) if request.query_params else None
 
     return await proxy_request(request=request, method=request.method, path=full_path, query_params=query_string)
