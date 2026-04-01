@@ -6,14 +6,17 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 from api.config import config
 from api.services.auth import clear_user_permissions_cache, generate_token
+from api.services.ip import ensure_ip_allowed
 
 router = APIRouter()
 security = HTTPBasic()
 
 
 @router.get("/login")
-async def login():
+async def login(request: Request):
     """Redirects the user to the GitHub OAuth2 authorization page."""
+    await ensure_ip_allowed(request)
+
     params = {
         "client_id": config.GITHUB_CLIENT_ID,
         "redirect_uri": f"{config.APP_URL}/auth/callback",
