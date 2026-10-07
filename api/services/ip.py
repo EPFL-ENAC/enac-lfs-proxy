@@ -11,12 +11,15 @@ ALLOWED_NETWORKS = [ipaddress.ip_network(cidr) for cidr in config.PUSH_IP_RANGES
 logger = logging.getLogger("uvicorn.error")
 
 
-async def ensure_ip_allowed(request: Request):
-    if not request.client:
-        logger.warning("Request missing client information, denying access")
-        raise HTTPException(status_code=403, detail="Missing client information")
+async def ensure_ip_allowed(request: Request, client_ip: str | None = None):
+    """client_ip overrides the connection's peer, e.g. the X-Real-IP that ingress-nginx sends with an auth check."""
+    if client_ip is None:
+        if not request.client:
+            logger.warning("Request missing client information, denying access")
+            raise HTTPException(status_code=403, detail="Missing client information")
+        client_ip = request.client.host
 
-    client_ip_str = request.client.host
+    client_ip_str = client_ip
 
     try:
         ip = ipaddress.ip_address(client_ip_str)
