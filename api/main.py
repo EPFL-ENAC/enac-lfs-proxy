@@ -1,6 +1,7 @@
 import base64
 import logging
 from contextlib import asynccontextmanager
+from urllib.parse import urlsplit
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -121,22 +122,12 @@ async def proxy_request(request: Request, method: str, path: str, query_params: 
     )
 
 
-@app.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "HEAD", "PATCH", "DELETE", "OPTIONS"])
-async def proxy_all(request: Request, full_path: str):
+async def authorize(request: Request, owner: str, repo: str, method: str, client_ip: str) -> Response | None:
     """
-    Catch-all route that proxies all HTTP methods to the backend.
-    This handles all Git LFS API endpoints generically with GitHub authentication.
-    The full access token always pass through. Other requests are filtered by IP and permissions.
+    None if `method` may run on `owner/repo` with the request's Basic credentials, else the
+    401 to send back. Insufficient permissions raise a 403 (and GitHub errors their own code).
+    The full access token always passes. Other credentials are filtered by IP and permissions.
     """
-    logger.info(f"Received request for path: {full_path}")
-
-    path_parts = full_path.strip("/").split("/")
-    if len(path_parts) < 3 or path_parts[0] != "api":
-        raise HTTPException(status_code=400, detail="Invalid path format")
-
-    owner = path_parts[1]
-    repo = path_parts[2]
-
     # Extract username and token from HTTP Basic Authentication
     username = None
     token = None
@@ -150,15 +141,10 @@ async def proxy_all(request: Request, full_path: str):
             decoded_credentials = base64.b64decode(encoded_credentials).decode("utf-8")
             username, token = decoded_credentials.split(":", 1)
         except (ValueError, UnicodeDecodeError):
-            logger.warning(
-                f"Invalid Basic auth header format in access attempt to {owner}/{repo} from {request.client.host if request.client else 'unknown'}"
-            )
-            pass
+            logger.warning(f"Invalid Basic auth header format in access attempt to {owner}/{repo} from {client_ip}")
 
     if not username or not token:
-        logger.info(
-            f"Missing basic auth info in access attempt to {owner}/{repo} from {request.client.host if request.client else 'unknown'}"
-        )
+        logger.info(f"Missing basic auth info in access attempt to {owner}/{repo} from {client_ip}")
         return Response(
             status_code=401,
             headers={"WWW-Authenticate": 'Basic realm="Git LFS Repository"'},
@@ -174,14 +160,52 @@ async def proxy_all(request: Request, full_path: str):
         logger.info("Granting full access via internal API token")
         permissions = GitHubPermissions(pull=True, push=True, admin=True)
     else:
-        await ensure_ip_allowed(request)
+        await ensure_ip_allowed(request, client_ip)
         permissions = await get_user_permissions(username, token, owner, repo)
 
-    if not check_repository_access(request.method, permissions):
+    if not check_repository_access(method, permissions):
         logger.info(f"Forbidden access attempt to {owner}/{repo} by user {username} with insufficient permissions")
-        raise HTTPException(
-            status_code=403, detail=f"Insufficient permissions to {request.method.upper()} in {owner}/{repo}"
-        )
+        raise HTTPException(status_code=403, detail=f"Insufficient permissions to {method.upper()} in {owner}/{repo}")
+    return None
+
+
+@app.get("/internal/auth-check", include_in_schema=False)
+async def auth_check(request: Request):
+    """
+    ingress-nginx external auth (`nginx.ingress.kubernetes.io/auth-url`): the ingress asks
+    whether the request it describes may go straight to the backend, so object bytes never
+    pass through this proxy. 200 lets it through; 401/403 refuse it.
+    Called by the ingress only: /internal is not routed publicly.
+    """
+    path = urlsplit(request.headers.get("x-original-url", "")).path
+    method = request.headers.get("x-original-method", "")
+    client_ip = request.headers.get("x-real-ip", "unknown")
+
+    path_parts = path.strip("/").split("/")
+    if len(path_parts) < 3 or path_parts[0] != "api" or not method:
+        logger.warning(f"Auth check without a usable X-Original-URL / X-Original-Method: {method} {path}")
+        return Response(status_code=403)
+
+    refusal = await authorize(request, path_parts[1], path_parts[2], method, client_ip)
+    return refusal or Response(status_code=200)
+
+
+@app.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "HEAD", "PATCH", "DELETE", "OPTIONS"])
+async def proxy_all(request: Request, full_path: str):
+    """
+    Catch-all route that proxies all HTTP methods to the backend.
+    This handles all Git LFS API endpoints generically with GitHub authentication.
+    """
+    logger.info(f"Received request for path: {full_path}")
+
+    path_parts = full_path.strip("/").split("/")
+    if len(path_parts) < 3 or path_parts[0] != "api":
+        raise HTTPException(status_code=400, detail="Invalid path format")
+
+    client_ip = request.client.host if request.client else "unknown"
+    refusal = await authorize(request, path_parts[1], path_parts[2], request.method, client_ip)
+    if refusal:
+        return refusal
 
     query_string = str(request.query_params) if request.query_params else None
 
