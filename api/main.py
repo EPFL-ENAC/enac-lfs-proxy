@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
+from starlette.background import BackgroundTask
 
 from api.config import config
 from api.models.auth import GitHubPermissions
@@ -59,8 +60,9 @@ async def proxy_request(request: Request, method: str, path: str, query_params: 
     logger.debug(f"Full URL: {url}")
     logger.debug(f"Request headers: {dict(request.headers)}")
 
-    headers = dict(request.headers)
-    headers.pop("host", None)
+    # Hop-by-hop headers belong to the client's connection, not to the one to the backend.
+    hop_by_hop = {"host", "connection", "keep-alive", "te", "trailers", "transfer-encoding", "upgrade"}
+    headers = {k: v for k, v in request.headers.items() if k.lower() not in hop_by_hop}
 
     if "accept" not in headers:
         headers["accept"] = "application/vnd.git-lfs+json"
@@ -70,46 +72,53 @@ async def proxy_request(request: Request, method: str, path: str, query_params: 
             yield chunk
 
     try:
-        backend_response = await client.request(
-            method=method,
-            url=url,
-            headers=headers,
-            content=request_body(),
+        # No body for GET/HEAD: an empty generator would go out as a chunked body.
+        has_body = method.upper() not in ("GET", "HEAD", "OPTIONS")
+        backend_request = client.build_request(
+            method=method, url=url, headers=headers, content=request_body() if has_body else None
         )
-
-        response_headers = dict(backend_response.headers)
-        hop_by_hop_headers = [
-            "connection",
-            "keep-alive",
-            "proxy-authenticate",
-            "proxy-authorization",
-            "te",
-            "trailers",
-            "transfer-encoding",
-            "upgrade",
-        ]
-        for header in hop_by_hop_headers:
-            response_headers.pop(header, None)
-
-        logger.info(
-            f"Response from proxied service: {backend_response.status_code} for {method} {path} from {client_ip}"
-        )
-        logger.debug(f"Response headers: {response_headers}")
-
-        async def response_stream():
-            async for chunk in backend_response.aiter_bytes():
-                yield chunk
-
-        return StreamingResponse(
-            response_stream(),
-            status_code=backend_response.status_code,
-            headers=response_headers,
-            media_type=response_headers.get("content-type"),
-        )
-
+        # stream=True: forward each object as it arrives, instead of holding it whole in memory.
+        backend_response = await client.send(backend_request, stream=True)
     except Exception as e:
-        logger.error(f"Error proxying request {method} {path} from {client_ip}: {str(e)}")
+        logger.error(f"Error proxying request {method} {path} from {client_ip}: {e!r}")
         return Response(content="Internal Server Error", status_code=500)
+
+    response_headers = dict(backend_response.headers)
+    hop_by_hop_headers = [
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailers",
+        "transfer-encoding",
+        "upgrade",
+    ]
+    for header in hop_by_hop_headers:
+        response_headers.pop(header, None)
+
+    logger.info(f"Response from proxied service: {backend_response.status_code} for {method} {path} from {client_ip}")
+    logger.debug(f"Response headers: {response_headers}")
+
+    async def response_stream():
+        sent = 0
+        try:
+            # Raw bytes: the Content-Length and Content-Encoding headers are passed on as they are.
+            async for chunk in backend_response.aiter_raw():
+                sent += len(chunk)
+                yield chunk
+        except Exception as e:
+            # The 200 is already sent and logged: a body cut short only shows up here.
+            logger.error(f"Body stream failed for {method} {path} from {client_ip} after {sent} bytes: {e!r}")
+            raise
+
+    return StreamingResponse(
+        response_stream(),
+        status_code=backend_response.status_code,
+        headers=response_headers,
+        media_type=response_headers.get("content-type"),
+        background=BackgroundTask(backend_response.aclose),
+    )
 
 
 @app.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "HEAD", "PATCH", "DELETE", "OPTIONS"])
@@ -133,10 +142,11 @@ async def proxy_all(request: Request, full_path: str):
     token = None
     auth_header = request.headers.get("authorization")
 
-    if auth_header and auth_header.startswith("Basic "):
+    scheme, _, encoded_credentials = (auth_header or "").partition(" ")
+    # The scheme is case-insensitive (RFC 9110): git and actions/checkout send "basic".
+    if scheme.lower() == "basic":
         try:
             # Decode Base64 credentials
-            encoded_credentials = auth_header[6:]  # Remove "Basic " prefix
             decoded_credentials = base64.b64decode(encoded_credentials).decode("utf-8")
             username, token = decoded_credentials.split(":", 1)
         except (ValueError, UnicodeDecodeError):
